@@ -49,17 +49,13 @@ def _clean(df: pd.DataFrame) -> pd.DataFrame:
                   for c in df.columns]
 
     # Parse price column: "€350,000" → 350000.0
-    if "price_eur" in df.columns:
-        df["price"] = (df["price_eur"]
-                       .astype(str)
-                       .str.replace("[€,]", "", regex=True)
-                       .str.strip()
-                       .pipe(pd.to_numeric, errors="coerce"))
-    elif any("price" in c for c in df.columns):
-        price_col = [c for c in df.columns if "price" in c][0]
+    # Robust detection: find any column with 'price' in name
+    price_col = next((c for c in df.columns if "price" in c.lower()), None)
+    if price_col:
         df["price"] = (df[price_col]
                        .astype(str)
-                       .str.replace("[€,]", "", regex=True)
+                       .str.replace(r"[^\d.]", "", regex=True)
+                       .str.strip()
                        .pipe(pd.to_numeric, errors="coerce"))
 
     # Drop rows with missing price
