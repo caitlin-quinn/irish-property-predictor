@@ -66,18 +66,22 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Create Kind cluster
-        uses: helm/kind-action@v1.10.0
-        with:
-          cluster_name: property-predictor-cluster
-          config: |
-            kind: Cluster
-            apiVersion: kind.x-k8s.io/v1alpha4
-            nodes:
-              - role: control-plane
-                extraPortMappings:
-                  - containerPort: 30000
-                    hostPort: 5000
-                    protocol: TCP
+        run: |
+          cat <<EOF > kind-config.yaml
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          nodes:
+            - role: control-plane
+              extraPortMappings:
+                - containerPort: 30000
+                  hostPort: 5000
+                  protocol: TCP
+          EOF
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.22.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          kind create cluster --name property-predictor-cluster --config kind-config.yaml
+          kubectl cluster-info
 
       - name: Pull and load Docker image into Kind
         run: |
