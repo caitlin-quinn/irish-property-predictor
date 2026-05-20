@@ -73,13 +73,8 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 20
             failureThreshold: 3
-          volumeMounts:
-            - name: model-storage
-              mountPath: /app/models
-              readOnly: true
-      volumes:
-        - name: model-storage
-          emptyDir: {}           # Replace with PVC in production
+          volumeMounts: []
+      volumes: []
 
 ---
 # ── Service ───────────────────────────────────────────────────────────────────
