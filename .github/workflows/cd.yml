@@ -17,17 +17,12 @@ env:
   K8S_NAMESPACE: property-predictor
 
 jobs:
-  # ── Job 1: Build & Push Docker Image ─────────────────────────────────────────
   build-and-push:
     name: Build & Push Docker Image
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
-    outputs:
-      image-tag: ${{ steps.meta.outputs.tags }}
-
     steps:
       - uses: actions/checkout@v4
 
@@ -63,12 +58,10 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ── Job 2: Deploy to Kind Kubernetes ─────────────────────────────────────────
   deploy:
     name: Deploy to Kind K8s Cluster
     runs-on: ubuntu-latest
     needs: build-and-push
-
     steps:
       - uses: actions/checkout@v4
 
@@ -92,12 +85,10 @@ jobs:
           kind load docker-image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
             --name property-predictor-cluster
 
-      - name: Prepare and apply Kubernetes manifests
+      - name: Apply Kubernetes manifests
         run: |
-          sed -i "s|ghcr.io/caitlin-quinn/irish-property-predictor:latest|${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest|g" \
-            kubernetes/deployment.yaml
-          sed -i "s|type: LoadBalancer|type: NodePort|g" \
-            kubernetes/deployment.yaml
+          sed -i "s|ghcr.io/caitlin-quinn/irish-property-predictor:latest|${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest|g" kubernetes/deployment.yaml
+          sed -i "s|type: LoadBalancer|type: NodePort|g" kubernetes/deployment.yaml
           kubectl apply -f kubernetes/deployment.yaml
 
       - name: Wait for rollout
@@ -106,25 +97,14 @@ jobs:
             --namespace=${{ env.K8S_NAMESPACE }} \
             --timeout=180s
 
-      - name: Run smoke tests
+      - name: Smoke test
         run: |
-          echo "Waiting for pod to be ready..."
           kubectl wait --for=condition=ready pod \
             -l app=property-predictor \
             --namespace=${{ env.K8S_NAMESPACE }} \
             --timeout=120s
-
-          echo "Testing health endpoint..."
-          kubectl port-forward \
-            svc/property-predictor-svc 8080:80 \
+          kubectl port-forward svc/property-predictor-svc 8080:80 \
             --namespace=${{ env.K8S_NAMESPACE }} &
           sleep 5
           curl --fail --retry 5 --retry-delay 3 http://localhost:8080/health
           echo "✅ Smoke test passed"
-
-      - name: Print deployment summary
-        if: success()
-        run: |
-          echo "## ✅ Deployment Successful" >> $GITHUB_STEP_SUMMARY
-          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
-          kubectl get pods --namespace=${{ env.K8S_NAMESPACE }}
