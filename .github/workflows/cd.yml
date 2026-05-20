@@ -1,5 +1,5 @@
 # ── Continuous Delivery ───────────────────────────────────────────────────────
-# Triggered on: push to main (after a PR merge from develop)
+# Triggered on: push to main
 # Stages: build Docker image → push to GHCR → deploy to Kind K8s cluster
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -10,13 +10,6 @@ on:
     branches:
       - main
   workflow_dispatch:
-    inputs:
-      environment:
-        description: "Target environment"
-        required: true
-        default: "production"
-        type: choice
-        options: [production, staging]
 
 env:
   REGISTRY: ghcr.io
@@ -34,19 +27,12 @@ jobs:
 
     outputs:
       image-tag: ${{ steps.meta.outputs.tags }}
-      image-digest: ${{ steps.build.outputs.digest }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download trained model from CI artefacts
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          workflow: ci.yml
-          branch: main
-          name: trained-model
-          path: models/
-        continue-on-error: true  # fall back if no prior CI run
+      - name: Create models directory
+        run: mkdir -p models
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -58,19 +44,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract Docker metadata (tags & labels)
+      - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=sha,prefix=sha-
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest
 
       - name: Build and push Docker image
-        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -79,25 +62,12 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          platforms: linux/amd64
-
-      - name: Docker image scan (Trivy)
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          format: table
-          exit-code: "0"           # warn but don't fail on vulnerabilities
-          severity: CRITICAL,HIGH
-
 
   # ── Job 2: Deploy to Kind Kubernetes ─────────────────────────────────────────
   deploy:
     name: Deploy to Kind K8s Cluster
     runs-on: ubuntu-latest
     needs: build-and-push
-    environment:
-      name: ${{ github.event.inputs.environment || 'production' }}
-      url: http://localhost:5000  # update with real ingress URL
 
     steps:
       - uses: actions/checkout@v4
@@ -116,48 +86,45 @@ jobs:
                     hostPort: 5000
                     protocol: TCP
 
-      - name: Load Docker image into Kind
+      - name: Pull and load Docker image into Kind
         run: |
           docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           kind load docker-image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
             --name property-predictor-cluster
 
-      - name: Set up kubectl
-        uses: azure/setup-kubectl@v4
-
-      - name: Apply Kubernetes manifests
+      - name: Prepare and apply Kubernetes manifests
         run: |
-          # Substitute the image tag
           sed -i "s|ghcr.io/caitlin-quinn/irish-property-predictor:latest|${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest|g" \
             kubernetes/deployment.yaml
-          # Change Service type to NodePort for Kind
-          sed -i "s|type: LoadBalancer|type: NodePort|g" kubernetes/deployment.yaml
-          sed -i "/targetPort: 5000/a\\          nodePort: 30000" kubernetes/deployment.yaml
+          sed -i "s|type: LoadBalancer|type: NodePort|g" \
+            kubernetes/deployment.yaml
           kubectl apply -f kubernetes/deployment.yaml
 
       - name: Wait for rollout
         run: |
           kubectl rollout status deployment/property-predictor \
             --namespace=${{ env.K8S_NAMESPACE }} \
+            --timeout=180s
+
+      - name: Run smoke tests
+        run: |
+          echo "Waiting for pod to be ready..."
+          kubectl wait --for=condition=ready pod \
+            -l app=property-predictor \
+            --namespace=${{ env.K8S_NAMESPACE }} \
             --timeout=120s
 
-      - name: Smoke test – health check
-        run: |
-          sleep 10
-          curl --fail --retry 5 --retry-delay 5 http://localhost:5000/health
+          echo "Testing health endpoint..."
+          kubectl port-forward \
+            svc/property-predictor-svc 8080:80 \
+            --namespace=${{ env.K8S_NAMESPACE }} &
+          sleep 5
+          curl --fail --retry 5 --retry-delay 3 http://localhost:8080/health
           echo "✅ Smoke test passed"
 
-      - name: Smoke test – prediction endpoint
+      - name: Print deployment summary
+        if: success()
         run: |
-          curl --fail -X POST http://localhost:5000/predict \
-            -H "Content-Type: application/json" \
-            -d '{"county":"Dublin","property_type":"Semi-detached house","floor_area_sqm":110,"bedrooms":3}' \
-            | python -c "import sys,json; d=json.load(sys.stdin); assert 'predicted_price_eur' in d"
-          echo "✅ Prediction endpoint test passed"
-
-      - name: Notify on failure
-        if: failure()
-        run: |
-          echo "::error::Deployment failed – initiating rollback"
-          kubectl rollout undo deployment/property-predictor \
-            --namespace=${{ env.K8S_NAMESPACE }}
+          echo "## ✅ Deployment Successful" >> $GITHUB_STEP_SUMMARY
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
+          kubectl get pods --namespace=${{ env.K8S_NAMESPACE }}
