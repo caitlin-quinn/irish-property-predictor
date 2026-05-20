@@ -1,4 +1,4 @@
-# 🏠 Irish Property Price Predictor — MLOps Pipeline
+# Irish Property Price Predictor — MLOps Pipeline
 
 [![CI](https://github.com/caitlin-quinn/irish-property-predictor/actions/workflows/ci.yml/badge.svg)](https://github.com/caitlin-quinn/irish-property-predictor/actions/workflows/ci.yml)
 [![CD](https://github.com/caitlin-quinn/irish-property-predictor/actions/workflows/cd.yml/badge.svg)](https://github.com/caitlin-quinn/irish-property-predictor/actions/workflows/cd.yml)
