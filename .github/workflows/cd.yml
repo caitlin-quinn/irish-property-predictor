@@ -93,13 +93,20 @@ jobs:
         run: |
           sed -i "s|ghcr.io/caitlin-quinn/irish-property-predictor:latest|${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest|g" kubernetes/deployment.yaml
           sed -i "s|type: LoadBalancer|type: NodePort|g" kubernetes/deployment.yaml
+          sed -i "s|imagePullPolicy: Always|imagePullPolicy: Never|g" kubernetes/deployment.yaml
+          sed -i "s|replicas: 2|replicas: 1|g" kubernetes/deployment.yaml
           kubectl apply -f kubernetes/deployment.yaml
+          echo "--- Applied manifest ---"
+          kubectl get all --namespace=${{ env.K8S_NAMESPACE }}
 
       - name: Wait for rollout
         run: |
           kubectl rollout status deployment/property-predictor \
             --namespace=${{ env.K8S_NAMESPACE }} \
-            --timeout=180s
+            --timeout=300s || \
+          (kubectl describe pods --namespace=${{ env.K8S_NAMESPACE }} && \
+           kubectl logs -l app=property-predictor --namespace=${{ env.K8S_NAMESPACE }} && \
+           exit 1)
 
       - name: Smoke test
         run: |
