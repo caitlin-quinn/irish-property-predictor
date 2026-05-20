@@ -32,8 +32,12 @@ COPY src/   ./src/
 COPY app/   ./app/
 COPY models/ ./models/
 
-# Ensure models directory exists (will be populated at runtime or via volume)
-RUN mkdir -p models data && chown -R appuser:appuser /app
+# Train model at build time so it's baked into the image
+RUN mkdir -p models data
+
+RUN python src/train.py
+
+RUN chown -R appuser:appuser /app
 
 USER appuser
 
