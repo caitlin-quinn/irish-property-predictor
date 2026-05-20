@@ -1,0 +1,213 @@
+# ── Continuous Training ───────────────────────────────────────────────────────
+# Triggered on: weekly schedule (Mondays 02:00 UTC) or manual dispatch
+# Stages: fetch fresh PPR data → retrain → evaluate → promote if better
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CT – Continuous Training
+
+on:
+  schedule:
+    - cron: "0 2 * * 1"   # Every Monday at 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      force_retrain:
+        description: "Force retrain even if no drift detected"
+        required: false
+        default: "false"
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/irish-property-predictor
+
+jobs:
+  # ── Job 1: Data Freshness & Drift Check ──────────────────────────────────────
+  data-drift-check:
+    name: Data Freshness & Drift Detection
+    runs-on: ubuntu-latest
+    outputs:
+      drift-detected: ${{ steps.drift.outputs.detected }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download fresh PPR data
+        run: python src/data_ingestion.py
+
+      - name: Run drift detection
+        id: drift
+        run: |
+          python -c "
+          import sys
+          sys.path.insert(0, 'src')
+          from evaluate import check_data_drift
+          report = check_data_drift()
+          drifted = any(v['drifted'] for v in report.values())
+          print(f'Drift detected: {drifted}')
+          # Write to GITHUB_OUTPUT
+          with open('${{ runner.temp }}/drift.txt', 'w') as f:
+              f.write(str(drifted).lower())
+          "
+          echo "detected=$(cat ${{ runner.temp }}/drift.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload new raw data
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh-ppr-data
+          path: data/ppr_raw.csv
+          retention-days: 30
+
+
+  # ── Job 2: Retrain Model ──────────────────────────────────────────────────────
+  retrain:
+    name: Retrain Model
+    runs-on: ubuntu-latest
+    needs: data-drift-check
+    if: |
+      needs.data-drift-check.outputs.drift-detected == 'true' ||
+      github.event.inputs.force_retrain == 'true' ||
+      github.event_name == 'workflow_dispatch'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download fresh data
+        uses: actions/download-artifact@v4
+        with:
+          name: fresh-ppr-data
+          path: data/
+
+      - name: Retrieve previous model metrics (baseline)
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: ct.yml
+          name: retrained-model
+          path: models/previous/
+        continue-on-error: true
+
+      - name: Retrain model on fresh data
+        run: python src/train.py
+        env:
+          MLFLOW_TRACKING_URI: ""   # local tracking during CT
+
+      - name: Evaluate new model
+        run: python src/evaluate.py
+
+      - name: Compare new vs baseline model
+        id: compare
+        run: |
+          python -c "
+          import json, os, sys
+
+          new_path = 'models/metrics.json'
+          old_path = 'models/previous/metrics.json'
+
+          with open(new_path) as f:
+              new = json.load(f)
+
+          print(f'New model  → R²={new[\"r2\"]:.4f} | MAE=€{new[\"mae\"]:,.0f}')
+
+          if os.path.exists(old_path):
+              with open(old_path) as f:
+                  old = json.load(f)
+              print(f'Old model  → R²={old[\"r2\"]:.4f} | MAE=€{old[\"mae\"]:,.0f}')
+              improved = new['r2'] >= old['r2'] and new['mae'] <= old['mae']
+          else:
+              print('No baseline model found – promoting new model.')
+              improved = True
+
+          print(f'Model improved: {improved}')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'improved={str(improved).lower()}\n')
+          "
+
+      - name: Upload retrained model
+        if: steps.compare.outputs.improved == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrained-model
+          path: |
+            models/property_price_model.pkl
+            models/metrics.json
+            models/evaluation_report.json
+            models/label_encoders.pkl
+            models/feature_names.json
+          retention-days: 90
+
+      - name: Skip promotion (model did not improve)
+        if: steps.compare.outputs.improved == 'false'
+        run: |
+          echo "::warning::New model did not outperform baseline. Keeping existing model."
+
+
+  # ── Job 3: Promote & Redeploy ─────────────────────────────────────────────────
+  promote-and-redeploy:
+    name: Promote Model & Trigger CD
+    runs-on: ubuntu-latest
+    needs: retrain
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download retrained model artefacts
+        uses: actions/download-artifact@v4
+        with:
+          name: retrained-model
+          path: models/
+
+      - name: Commit updated model artefacts
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add models/metrics.json models/evaluation_report.json
+          git diff --staged --quiet || git commit \
+            -m "chore(ct): promote retrained model $(date +'%Y-%m-%d') [skip ci]"
+          git push
+
+      - name: Trigger CD pipeline
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          event-type: model-retrained
+          client-payload: |
+            {
+              "trigger": "continuous-training",
+              "date": "${{ github.run_id }}"
+            }
+
+      - name: Post training summary
+        run: |
+          echo "## ✅ CT Pipeline Complete" >> $GITHUB_STEP_SUMMARY
+          python -c "
+          import json
+          with open('models/metrics.json') as f:
+              m = json.load(f)
+          print(f'| Metric | Value |')
+          print(f'|--------|-------|')
+          print(f'| MAE    | €{m[\"mae\"]:,.0f} |')
+          print(f'| RMSE   | €{m[\"rmse\"]:,.0f} |')
+          print(f'| R²     | {m[\"r2\"]} |')
+          print(f'| MAPE   | {m[\"mape\"]}% |')
+          " >> $GITHUB_STEP_SUMMARY

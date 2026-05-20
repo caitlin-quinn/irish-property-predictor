@@ -1,0 +1,179 @@
+# ── Continuous Integration ────────────────────────────────────────────────────
+# Triggered on: push/PR to feature/* and develop branches
+# Stages: lint → unit tests → data validation → model quality gate
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CI – Continuous Integration
+
+on:
+  push:
+    branches:
+      - "feature/**"
+      - develop
+  pull_request:
+    branches:
+      - develop
+      - main
+
+jobs:
+  # ── Job 1: Code Quality ──────────────────────────────────────────────────────
+  lint:
+    name: Code Quality & Linting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install linting tools
+        run: pip install flake8 black isort
+
+      - name: Check formatting (black)
+        run: black --check src/ app/ tests/
+
+      - name: Check import ordering (isort)
+        run: isort --check-only src/ app/ tests/
+
+      - name: Lint with flake8
+        run: |
+          flake8 src/ app/ tests/ \
+            --max-line-length=120 \
+            --ignore=E203,W503 \
+            --statistics
+
+
+  # ── Job 2: Unit Tests ────────────────────────────────────────────────────────
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests with coverage
+        run: |
+          pytest tests/ -v \
+            --cov=src --cov=app \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --tb=short
+
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
+
+
+  # ── Job 3: Data Validation ───────────────────────────────────────────────────
+  data-validation:
+    name: Data Validation
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run data ingestion
+        run: python src/data_ingestion.py
+
+      - name: Validate dataset schema & quality
+        run: |
+          python -c "
+          import pandas as pd, sys
+          df = pd.read_csv('data/ppr_raw.csv', encoding='latin-1')
+          required = ['County', 'Price (€)', 'Description of Property']
+          missing = [c for c in required if c not in df.columns]
+          if missing:
+              print(f'FAIL: missing columns: {missing}')
+              sys.exit(1)
+          print(f'PASS: {len(df)} rows, {len(df.columns)} cols')
+          print(df['County'].value_counts().head())
+          "
+
+      - name: Run preprocessing
+        run: python src/preprocessing.py
+
+      - name: Upload processed data as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: processed-data
+          path: data/ppr_processed.csv
+          retention-days: 5
+
+
+  # ── Job 4: Model Training & Quality Gate ─────────────────────────────────────
+  train-and-validate:
+    name: Model Training & Quality Gate
+    runs-on: ubuntu-latest
+    needs: [test, data-validation]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Train model
+        run: python src/train.py
+
+      - name: Run quality gate evaluation
+        run: python src/evaluate.py
+
+      - name: Upload model artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: trained-model
+          path: |
+            models/property_price_model.pkl
+            models/metrics.json
+            models/evaluation_report.json
+            models/label_encoders.pkl
+            models/feature_names.json
+          retention-days: 7
+
+      - name: Comment metrics on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const metrics = JSON.parse(fs.readFileSync('models/metrics.json'));
+            const body = `## 📊 Model Metrics\n\n` +
+              `| Metric | Value |\n|--------|-------|\n` +
+              `| MAE    | €${metrics.mae.toLocaleString()} |\n` +
+              `| RMSE   | €${metrics.rmse.toLocaleString()} |\n` +
+              `| R²     | ${metrics.r2} |\n` +
+              `| MAPE   | ${metrics.mape}% |\n`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });

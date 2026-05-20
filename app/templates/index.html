@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Irish Property Price Predictor</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: linear-gradient(135deg, #1a6b3c 0%, #009a5a 50%, #ff7900 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .card {
+      background: white;
+      border-radius: 16px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      max-width: 600px;
+      width: 100%;
+      overflow: hidden;
+    }
+    .card-header {
+      background: #1a6b3c;
+      color: white;
+      padding: 24px 32px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .harp { font-size: 2.5rem; }
+    .card-header h1 { font-size: 1.4rem; font-weight: 700; }
+    .card-header p  { font-size: 0.85rem; opacity: 0.85; margin-top: 4px; }
+    .card-body { padding: 32px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .full { grid-column: 1 / -1; }
+    label { display: block; font-size: 0.8rem; font-weight: 600;
+            color: #555; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+    select, input {
+      width: 100%; padding: 10px 12px; border: 1.5px solid #ddd;
+      border-radius: 8px; font-size: 0.95rem; transition: border-color 0.2s;
+    }
+    select:focus, input:focus { outline: none; border-color: #1a6b3c; }
+    button {
+      width: 100%; padding: 14px;
+      background: linear-gradient(90deg, #1a6b3c, #009a5a);
+      color: white; border: none; border-radius: 8px;
+      font-size: 1rem; font-weight: 700; cursor: pointer;
+      margin-top: 8px; transition: opacity 0.2s;
+    }
+    button:hover { opacity: 0.9; }
+    #result { display: none; margin-top: 24px; }
+    .price-box {
+      background: linear-gradient(135deg, #1a6b3c, #009a5a);
+      color: white; border-radius: 12px; padding: 24px; text-align: center;
+    }
+    .price-label { font-size: 0.85rem; opacity: 0.85; text-transform: uppercase; letter-spacing: 1px; }
+    .price-value { font-size: 2.4rem; font-weight: 800; margin: 8px 0; }
+    .price-ci    { font-size: 0.85rem; opacity: 0.8; }
+    .error-box {
+      background: #fff0f0; border: 1px solid #ffcccc;
+      border-radius: 8px; padding: 16px; color: #c00;
+    }
+    .loading { text-align: center; color: #777; padding: 16px; }
+    .divider { height: 1px; background: #eee; margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="card-header">
+      <span class="harp">🏠</span>
+      <div>
+        <h1>Irish Property Price Predictor</h1>
+        <p>Machine Learning model trained on the Property Price Register</p>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="grid">
+        <div class="full">
+          <label>County</label>
+          <select id="county">
+            {% for c in counties %}
+            <option value="{{ c }}" {% if c == 'Dublin' %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="full">
+          <label>Property Type</label>
+          <select id="property_type">
+            {% for t in property_types %}
+            <option value="{{ t }}" {% if t == 'Semi-detached house' %}selected{% endif %}>{{ t }}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div>
+          <label>Floor Area (m²)</label>
+          <input type="number" id="floor_area" value="110" min="20" max="500">
+        </div>
+
+        <div>
+          <label>Bedrooms</label>
+          <input type="number" id="bedrooms" value="3" min="1" max="10">
+        </div>
+
+        <div>
+          <label>BER Rating</label>
+          <select id="ber_rating">
+            {% for b in ber_ratings %}
+            <option value="{{ b }}" {% if b == 'B2' %}selected{% endif %}>{{ b }}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div>
+          <label>Property Age (years)</label>
+          <input type="number" id="property_age" value="20" min="0" max="200">
+        </div>
+      </div>
+
+      <div class="divider"></div>
+      <button onclick="predict()">Predict Price 🏷️</button>
+
+      <div id="result"></div>
+    </div>
+  </div>
+
+  <script>
+    async function predict() {
+      const result = document.getElementById('result');
+      result.style.display = 'block';
+      result.innerHTML = '<div class="loading">Calculating…</div>';
+
+      const payload = {
+        county:         document.getElementById('county').value,
+        property_type:  document.getElementById('property_type').value,
+        floor_area_sqm: parseFloat(document.getElementById('floor_area').value),
+        bedrooms:       parseInt(document.getElementById('bedrooms').value),
+        ber_rating:     document.getElementById('ber_rating').value,
+        property_age:   parseInt(document.getElementById('property_age').value),
+        sale_year:      new Date().getFullYear(),
+        sale_month:     new Date().getMonth() + 1,
+      };
+
+      try {
+        const resp = await fetch('/predict', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+
+        if (data.error) {
+          result.innerHTML = `<div class="error-box">⚠️ ${data.error}</div>`;
+          return;
+        }
+
+        const fmt = n => '€' + Number(n).toLocaleString('en-IE');
+        result.innerHTML = `
+          <div class="price-box">
+            <div class="price-label">Estimated Market Value</div>
+            <div class="price-value">${fmt(data.predicted_price_eur)}</div>
+            <div class="price-ci">
+              95% CI: ${fmt(data.confidence_interval.lower)} – ${fmt(data.confidence_interval.upper)}
+            </div>
+          </div>`;
+      } catch (e) {
+        result.innerHTML = `<div class="error-box">⚠️ Network error: ${e.message}</div>`;
+      }
+    }
+  </script>
+</body>
+</html>

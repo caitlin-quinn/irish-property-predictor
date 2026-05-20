@@ -1,0 +1,60 @@
+version: "3.9"
+
+services:
+  # ── Train & build model ──────────────────────────────────────────────────────
+  trainer:
+    build: .
+    image: irish-property-predictor:latest
+    container_name: ppr_trainer
+    command: python src/train.py
+    volumes:
+      - ./models:/app/models
+      - ./data:/app/data
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5001
+    depends_on:
+      - mlflow
+    profiles:
+      - train
+
+  # ── Flask API ────────────────────────────────────────────────────────────────
+  api:
+    build: .
+    image: irish-property-predictor:latest
+    container_name: ppr_api
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./models:/app/models:ro
+      - ./data:/app/data:ro
+    environment:
+      - PORT=5000
+      - MLFLOW_TRACKING_URI=http://mlflow:5001
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      - mlflow
+    restart: unless-stopped
+
+  # ── MLflow tracking server ───────────────────────────────────────────────────
+  mlflow:
+    image: python:3.11-slim
+    container_name: ppr_mlflow
+    command: >
+      sh -c "pip install mlflow -q &&
+             mlflow server --host 0.0.0.0 --port 5001
+             --default-artifact-root /mlflow/artifacts
+             --backend-store-uri /mlflow/mlruns"
+    ports:
+      - "5001:5001"
+    volumes:
+      - mlflow_data:/mlflow
+    restart: unless-stopped
+
+volumes:
+  mlflow_data:
